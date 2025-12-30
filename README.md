@@ -81,6 +81,8 @@ TARGET_METHOD_NAME = "process_transaction"
 * **Ctypes**: For interacting with Windows API (kernel32, advapi32).
 * **Rich**: For the beautiful CLI interface.
 
+---
+
 ## 📜 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
