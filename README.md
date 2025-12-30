@@ -74,11 +74,13 @@ TARGET_METHOD_NAME = "process_transaction"
 
 **Mode 2 (Inspector)** and **Mode 6 (Deep Scan)** are fully automatic and require no configuration.
 
-## 🛠 **Technology Stack**
-Python 3: Core logic.
-Pymem: For reading/writing process memory and DLL injection.
-Ctypes: For interacting with Windows API (kernel32, advapi32).
-Rich: For the beautiful CLI interface.
+## 🛠 Technology Stack
 
-##📜 License
+* **Python 3**: Core logic.
+* **Pymem**: For reading/writing process memory and DLL injection.
+* **Ctypes**: For interacting with Windows API (kernel32, advapi32).
+* **Rich**: For the beautiful CLI interface.
+
+## 📜 License
+
 This project is licensed under the MIT License - see the LICENSE file for details.
