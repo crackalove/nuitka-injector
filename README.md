@@ -35,5 +35,6 @@ The framework includes **9 distinct payloads** for different phases of analysis:
 
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/YOUR_USERNAME/nuitka-injector.git](https://github.com/YOUR_USERNAME/nuitka-injector.git)
+   git clone https://github.com/crackalove/nuitka-injector
    cd nuitka-injector
+   python injector.py
