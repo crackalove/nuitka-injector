@@ -50,9 +50,9 @@ The framework includes **9 distinct payloads** for different phases of analysis:
 Note: You must run this tool as Administrator to acquire `SeDebugPrivilege` for memory injection.
 
 1. Run the injector:
-` ```bash `
-` python injector.py `
-` ``` `
+ ```bash
+ python injector.py 
+ ``` 
 
 2. Select the **Target PID** from the list of detected Python processes.
 The tool automatically detects architecture (x86/x64) and Python version.
