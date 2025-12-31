@@ -1,4 +1,4 @@
-# 💉 Nuitka / PyInstaller Python Injector
+# 💉 **Nuitka / PyInstaller Python Injector**
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows-win)
@@ -15,7 +15,7 @@ It specifically targets compiled Python applications (Nuitka, PyInstaller, cx_Fr
 
 ---
 
-## ⌨️ Features
+## ⌨️ **Features**
 
 The framework includes **9 distinct payloads** for different phases of analysis:
 
@@ -31,7 +31,7 @@ The framework includes **9 distinct payloads** for different phases of analysis:
 
 ---
 
-## 🚀 Installation
+## 🚀 **Installation**
 
 1. Clone the repository:
    ```bash
@@ -46,7 +46,7 @@ The framework includes **9 distinct payloads** for different phases of analysis:
 
 ---
 
-## 💻 Usage
+## 💻 **Usage**
 Note: You must run this tool as Administrator to acquire `SeDebugPrivilege` for memory injection.
 
 1. Run the injector:
@@ -62,7 +62,7 @@ The tool automatically detects architecture (x86/x64) and Python version.
 4. Check the output logs generated in the %TEMP% directory (or the script folder).
 Select the Target PID from the list of detected Python processes.
 
-## ⚙️ Configuration (Advanced)
+## ⚙️ **Configuration (Advanced)**
 Modes **3 (Fuzzer), 4 (Payday),** and **7 (MITM)** act as templates. To target a specific logic in a specific application, you need to edit the injector.py file.
 Look for the `configuration`  blocks inside the payload strings:
 `TARGET_CLASS_NAME = "PaymentProcessor"`  and  `TARGET_METHOD_NAME = "process_transaction"`
