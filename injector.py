@@ -104,7 +104,7 @@ def get_arch(pid: int) -> str:
 
     h = None
     try:
-        h = kernel32.OpenProcess(0x1000, False, pid) # PROCESS_QUERY_LIMITED_INFORMATION
+        h = kernel32.OpenProcess(0x1000, False, pid)
         if not h: return "Unknown"
         
         wow64 = ctypes.c_bool()
@@ -313,7 +313,6 @@ def run():
         # (!) напиши свой код тут
         # =======================================================
 
-        # --- YOUR CODE: ---
         lines.append("[!] No custom payload defined yet.")
         lines.append("[*] Edit payload_payday() in injector.py to add logic.")
 
