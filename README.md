@@ -65,30 +65,21 @@ Select the Target PID from the list of detected Python processes.
 ## ⚙️ Configuration (Advanced)
 Modes **3 (Fuzzer), 4 (Payday),** and **7 (MITM)** act as templates. To target a specific logic in a specific application, you need to edit the injector.py file.
 Look for the `configuration` blocks inside the payload strings:
+`TARGET_CLASS_NAME = "PaymentProcessor"`
 
+`TARGET_METHOD_NAME = "process_transaction"`
+**Inspector, Deep Scan, HTTP Spy,** and **Dumpers** are fully automatic and require no configuration.
 
+## 🛠 **Technology Stack**
+**Python 3**: Core logic.
 
-# =======================================================
-# (!) CONFIGURATION: TARGET TO HOOK
-# =======================================================
+**Pymem**: For reading/writing process memory and allocating shellcode.
 
-# Target Class Name (e.g., "PaymentProcessor")
-TARGET_CLASS_NAME = "PaymentProcessor"  
+**Pefile**: For static analysis of DLL exports (Cross-Arch resolution).
 
-# Target Method Name (e.g., "process_transaction")
-TARGET_METHOD_NAME = "process_transaction"
-Inspector, Deep Scan, HTTP Spy, and Dumpers are fully automatic and require no configuration.
+**Native WinAPI**: Direct usage of GetNativeSystemInfo, OpenProcess, and CreateRemoteThread.
 
-## 🛠 Technology Stack
-Python 3: Core logic.
+**Rich**: For the professional CLI interface.
 
-Pymem: For reading/writing process memory and allocating shellcode.
-
-Pefile: For static analysis of DLL exports (Cross-Arch resolution).
-
-Native WinAPI: Direct usage of GetNativeSystemInfo, OpenProcess, and CreateRemoteThread.
-
-Rich: For the professional CLI interface.
-
-📜 License
+## 📜 **License**
 This project is licensed under the MIT License - see the LICENSE file for details.
