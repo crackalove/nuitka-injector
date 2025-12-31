@@ -66,6 +66,7 @@ Select the Target PID from the list of detected Python processes.
 Modes **3 (Fuzzer), 4 (Payday),** and **7 (MITM)** act as templates. To target a specific logic in a specific application, you need to edit the injector.py file.
 Look for the `configuration`  blocks inside the payload strings:
 `TARGET_CLASS_NAME = "PaymentProcessor"` and `TARGET_METHOD_NAME = "process_transaction"`
+
 **Inspector, Deep Scan, HTTP Spy,** and **Dumpers** are fully automatic and require no configuration.
 
 ## 🛠 **Technology Stack**
