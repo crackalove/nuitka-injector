@@ -9,7 +9,9 @@ A powerful **Reverse Engineering & Red Teaming framework** designed to inject ar
 
 It specifically targets compiled Python applications (Nuitka, PyInstaller, cx_Freeze) where the source code is hidden. The tool injects a DLL payload, initializes the Python API within the victim process, and grants full control over the runtime environment.
 
+
 > **⚠️ DISCLAIMER**: This tool is for **educational purposes and authorized security testing only**. The author is not responsible for any misuse.
+
 
 ---
 
