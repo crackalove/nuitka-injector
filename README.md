@@ -37,4 +37,64 @@ The framework includes **9 distinct payloads** for different phases of analysis:
    ```bash
    git clone https://github.com/crackalove/nuitka-injector
    cd nuitka-injector
-   python injector.py
+   ```
+
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+---
+
+## 💻 Usage
+Note: You must run this tool as Administrator to acquire `SeDebugPrivilege` for memory injection.
+
+1. Run the injector:
+   ```bash
+python injector.py
+   ```
+
+2. Select the **Target PID** from the list of detected Python processes.
+The tool automatically detects architecture (x86/x64) and Python version.
+
+3. Choose a Payload Mode (1-9) from the menu.
+
+4. Check the output logs generated in the %TEMP% directory (or the script folder).
+Select the Target PID from the list of detected Python processes.
+
+The tool automatically detects architecture (x86/x64) and Python version.
+
+Choose a **Payload Mode (1-9)** from the menu.
+
+Check the output logs generated in the `%TEMP%` directory (or the script folder).
+
+## ⚙️ Configuration (Advanced)
+Modes **3 (Fuzzer), 4 (Payday),** and **7 (MITM)** act as templates. To target a specific logic in a specific application, you need to edit the injector.py file.
+Look for the configuration blocks inside the payload strings:
+
+Python
+
+# =======================================================
+# (!) CONFIGURATION: TARGET TO HOOK
+# =======================================================
+
+# Target Class Name (e.g., "PaymentProcessor")
+TARGET_CLASS_NAME = "PaymentProcessor"  
+
+# Target Method Name (e.g., "process_transaction")
+TARGET_METHOD_NAME = "process_transaction"
+Inspector, Deep Scan, HTTP Spy, and Dumpers are fully automatic and require no configuration.
+
+🛠 Technology Stack
+Python 3: Core logic.
+
+Pymem: For reading/writing process memory and allocating shellcode.
+
+Pefile: For static analysis of DLL exports (Cross-Arch resolution).
+
+Native WinAPI: Direct usage of GetNativeSystemInfo, OpenProcess, and CreateRemoteThread.
+
+Rich: For the professional CLI interface.
+
+📜 License
+This project is licensed under the MIT License - see the LICENSE file for details.
