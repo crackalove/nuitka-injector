@@ -85,5 +85,7 @@ Modes 10, 11 and 12 are fully automatic and require no additional configuration.
 
 **Rich**: For the professional CLI interface.
 
+**AOB fallback scanning** and improved static binary detection for stripped Python exports.
+
 ## 📜 **License**
 This project is licensed under the MIT License - see the LICENSE file for details.
