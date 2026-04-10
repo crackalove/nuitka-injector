@@ -139,7 +139,6 @@ def _probe_exe_for_python_api(exe_path: str) -> bool:
         pass
     return False
 
-# skip these process names in the heuristic check (never contain Python)
 _SKIP_NAMES = {
     'system', 'registry', 'smss.exe', 'csrss.exe', 'wininit.exe',
     'services.exe', 'lsass.exe', 'svchost.exe', 'dwm.exe', 'conhost.exe',
@@ -179,7 +178,6 @@ def scan_procs() -> List[Dict]:
                         'static': False
                     })
                 else:
-                    # Heuristic: only for non-system processes
                     if pname.lower() in _SKIP_NAMES:
                         continue
                     exe_path = p.info.get('exe', '')
@@ -1275,7 +1273,7 @@ def _aob_scan_module(pm, module_handle, module_size, pattern: bytes) -> int:
     """Scan a module's memory for a byte pattern (AOB scan).
     Returns the address of the first match or 0."""
     try:
-        CHUNK = 0x10000  # read 64KB chunks
+        CHUNK = 0x10000
         base = module_handle
         for offset in range(0, module_size, CHUNK):
             read_size = min(CHUNK, module_size - offset)
@@ -1291,20 +1289,14 @@ def _aob_scan_module(pm, module_handle, module_size, pattern: bytes) -> int:
     return 0
 
 
-# Well-known byte patterns for common Python C-API function prologues.
-# These are searched only as a last resort when the export table has no match.
-# Each entry: { 'name': str, 'patterns_x64': [bytes], 'patterns_x86': [bytes] }
-# The patterns are the first N bytes of the function body (unique enough to identify).
 _AOB_PATTERNS = {
-    # PyRun_SimpleString is a thin wrapper around PyRun_SimpleStringFlags
-    # common prologue: sub rsp, 28h; xor edx, edx; call PyRun_SimpleStringFlags
     'PyRun_SimpleString': {
-        'x64': [b'\x48\x83\xEC\x28\x33\xD2'],   # sub rsp,28h; xor edx,edx
-        'x86': [b'\x6A\x00\xFF\x74\x24'],          # push 0; push [esp+arg]
+        'x64': [b'\x48\x83\xEC\x28\x33\xD2'],
+        'x86': [b'\x6A\x00\xFF\x74\x24'],
     },
     'PyGILState_Ensure': {
-        'x64': [b'\x48\x89\x5C\x24'],              # mov [rsp+...], rbx (common prologue)
-        'x86': [b'\x53\x56\x57'],                    # push ebx; push esi; push edi
+        'x64': [b'\x48\x89\x5C\x24'],
+        'x86': [b'\x53\x56\x57'],
     },
 }
 
@@ -1341,9 +1333,6 @@ def get_remote_func(pm, dll_path, func_name):
             if remote_mod:
                 return remote_mod.lpBaseOfDll + func_rva
         
-        # ---------------------------------------------------------------
-        # FALLBACK: AOB pattern scan when exports are stripped / missing
-        # ---------------------------------------------------------------
         if not func_rva:
             console.print(f"[yellow][!] Export '{func_name}' not found in EAT, trying AOB scan...[/yellow]")
             remote_mod = pymem.process.module_from_name(pm.process_handle, os.path.basename(dll_path))
