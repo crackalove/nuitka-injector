@@ -117,25 +117,82 @@ def get_arch(pid: int) -> str:
     finally:
         if h: kernel32.CloseHandle(h)
 
+PYAPI_SIGNATURES = {
+    'PyRun_SimpleString': b'PyRun_SimpleString',
+    'PyGILState_Ensure':  b'PyGILState_Ensure',
+    'PyGILState_Release': b'PyGILState_Release',
+}
+
+def _probe_exe_for_python_api(exe_path: str) -> bool:
+    """Check if the .exe exports Python C-API (static link). Fast path."""
+    try:
+        pe = pefile.PE(exe_path, fast_load=True)
+        pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
+        if hasattr(pe, 'DIRECTORY_ENTRY_EXPORT'):
+            names = {exp.name for exp in pe.DIRECTORY_ENTRY_EXPORT.symbols if exp.name}
+            for sig in PYAPI_SIGNATURES.values():
+                if sig in names:
+                    pe.close()
+                    return True
+        pe.close()
+    except:
+        pass
+    return False
+
+# skip these process names in the heuristic check (never contain Python)
+_SKIP_NAMES = {
+    'system', 'registry', 'smss.exe', 'csrss.exe', 'wininit.exe',
+    'services.exe', 'lsass.exe', 'svchost.exe', 'dwm.exe', 'conhost.exe',
+    'explorer.exe', 'taskhostw.exe', 'sihost.exe', 'ctfmon.exe',
+    'searchhost.exe', 'runtimebroker.exe', 'shellexperiencehost.exe',
+    'startmenuexperiencehost.exe', 'textinputhost.exe', 'dllhost.exe',
+    'fontdrvhost.exe', 'winlogon.exe', 'spoolsv.exe', 'msdtc.exe',
+    'audiodg.exe', 'searchindexer.exe', 'securityhealthservice.exe',
+    'msedge.exe', 'chrome.exe', 'firefox.exe', 'opera.exe', 'brave.exe',
+}
+
 def scan_procs() -> List[Dict]:
     res = []
-    for p in psutil.process_iter(['pid', 'name']):
-        try:
-            pid = p.info['pid']
-            proc = psutil.Process(pid)
-            dlls = [m.path for m in proc.memory_maps()]
-            py_dlls = [d for d in dlls if 'python' in d.lower() and d.lower().endswith('.dll')]
-            
-            if py_dlls:
-                dll_path = py_dlls[0]
-                dll_name = os.path.basename(dll_path)
-                ver_m = re.search(r'python(\d)(\d+)', dll_name.lower())
-                ver = f"{ver_m.group(1)}.{ver_m.group(2)}" if ver_m else "??"
-                res.append({
-                    'pid': pid, 'name': p.info['name'], 'ver': ver,
-                    'dll_path': dll_path, 'dll_name': dll_name, 'arch': get_arch(pid)
-                })
-        except: continue
+    with console.status("[cyan]Scanning processes...[/cyan]", spinner="dots") as status:
+        for p in psutil.process_iter(['pid', 'name', 'exe']):
+            try:
+                pid = p.info['pid']
+                if pid <= 4:
+                    continue
+                pname = p.info['name'] or ''
+
+                proc = psutil.Process(pid)
+                try:
+                    dlls = [m.path for m in proc.memory_maps()]
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    continue
+                py_dlls = [d for d in dlls if 'python' in d.lower() and d.lower().endswith('.dll')]
+
+                if py_dlls:
+                    dll_path = py_dlls[0]
+                    dll_name = os.path.basename(dll_path)
+                    ver_m = re.search(r'python(\d)(\d+)', dll_name.lower())
+                    ver = f"{ver_m.group(1)}.{ver_m.group(2)}" if ver_m else "??"
+                    res.append({
+                        'pid': pid, 'name': pname, 'ver': ver,
+                        'dll_path': dll_path, 'dll_name': dll_name, 'arch': get_arch(pid),
+                        'static': False
+                    })
+                else:
+                    # Heuristic: only for non-system processes
+                    if pname.lower() in _SKIP_NAMES:
+                        continue
+                    exe_path = p.info.get('exe', '')
+                    if exe_path and os.path.isfile(exe_path):
+                        status.update(f"[cyan]Probing {pname}...[/cyan]")
+                        if _probe_exe_for_python_api(exe_path):
+                            res.append({
+                                'pid': pid, 'name': pname, 'ver': 'static',
+                                'dll_path': exe_path, 'dll_name': os.path.basename(exe_path),
+                                'arch': get_arch(pid), 'static': True
+                            })
+            except:
+                continue
     return res
 
 
@@ -329,19 +386,177 @@ except: pass
 
 def payload_anti_anti_debug() -> str:
     return get_common_header() + r"""
+import ctypes
+import struct
+
 def run():
-    lines = ["[*] Executing Anti-Anti-Debug bypass"]
+    lines = ["[*] Executing Deep Anti-Anti-Debug bypass (REAL memory patching)"]
+    patched = 0
     try:
-        import ctypes
-        if hasattr(ctypes, 'windll'):
-            ctypes.windll.kernel32.IsDebuggerPresent.restype = ctypes.c_int
-            ctypes.windll.kernel32.IsDebuggerPresent = lambda: 0
-            lines.append("[+] Stealth hooks installed (IsDebuggerPresent -> 0)")
+        if not hasattr(ctypes, 'windll'):
+            lines.append("[-] No ctypes.windll — skipping (non-Windows?)")
+            save_log("nuitka_anti_anti_debug.txt", lines)
+            return
+
+        k32 = ctypes.windll.kernel32
+        ntdll = ctypes.windll.ntdll
+
+        PAGE_EXECUTE_READWRITE = 0x40
+        old_protect = ctypes.c_ulong(0)
+
+        def patch_bytes(module_name, func_name, patch, description):    
+            nonlocal patched
+            try:
+                h_mod = k32.GetModuleHandleA(module_name)
+                if not h_mod:
+                    lines.append(f"[-] Module '{module_name.decode()}' not found")
+                    return False
+
+                addr = k32.GetProcAddress(h_mod, func_name)
+                if not addr:
+                    lines.append(f"[-] Function '{func_name.decode()}' not found in {module_name.decode()}")
+                    return False
+
+                # make the memory writable
+                if not k32.VirtualProtect(
+                    ctypes.c_void_p(addr), len(patch),
+                    PAGE_EXECUTE_READWRITE, ctypes.byref(old_protect)
+                ):
+                    lines.append(f"[-] VirtualProtect failed for {func_name.decode()} (err={k32.GetLastError()})")
+                    return False
+
+                # write the patch
+                ctypes.memmove(ctypes.c_void_p(addr), patch, len(patch))
+
+                # restore original protection
+                k32.VirtualProtect(
+                    ctypes.c_void_p(addr), len(patch),
+                    old_protect.value, ctypes.byref(old_protect)
+                )
+
+                lines.append(f"[+] {description}: wrote {len(patch)} bytes at 0x{addr:X}")
+                patched += 1
+                return True
+            except Exception as e:
+                lines.append(f"[-] {description} failed: {e}")
+                return False
+
+        # ----------------------------------------------------------------
+        # 1. IsDebuggerPresent -> xor eax, eax; ret  (always returns 0)
+        #    x86/x64: 31 C0 C3
+        # ----------------------------------------------------------------
+        patch_bytes(
+            b"kernel32.dll", b"IsDebuggerPresent",
+            b"\x31\xC0\xC3",
+            "IsDebuggerPresent -> ret 0"
+        )
+
+        # ----------------------------------------------------------------
+        # 2. CheckRemoteDebuggerPresent
+        #    x64: mov dword ptr [rdx], 0; xor eax,eax; ret
+        #         C7 02 00 00 00 00  31 C0  C3
+        #    x86: push ebp; mov ebp,esp; mov eax,[ebp+0Ch]; mov dword [eax],0; xor eax,eax; pop ebp; ret 8
+        #         55 8B EC 8B 45 0C C7 00 00 00 00 00 31 C0 5D C2 08 00
+        # ----------------------------------------------------------------
+        import platform
+        if platform.architecture()[0] == '64bit':
+            patch_bytes(
+                b"kernel32.dll", b"CheckRemoteDebuggerPresent",
+                b"\xC7\x02\x00\x00\x00\x00\x31\xC0\xC3",
+                "CheckRemoteDebuggerPresent -> *pbDebugger=0, ret 0 (x64)"
+            )
         else:
-            lines.append("[-] Stealth skipped (no ctypes)")
-    except Exception as e: 
-        lines.append(f"[-] Error: {e}")
-    
+            patch_bytes(
+                b"kernel32.dll", b"CheckRemoteDebuggerPresent",
+                b"\x55\x8B\xEC\x8B\x45\x0C\xC7\x00\x00\x00\x00\x00\x31\xC0\x5D\xC2\x08\x00",
+                "CheckRemoteDebuggerPresent -> *pbDebugger=0, ret 0 (x86)"
+            )
+
+        # ----------------------------------------------------------------
+        # 3. NtQueryInformationProcess — return STATUS_INVALID_INFO_CLASS (0xC0000003)
+        #    to prevent leaking DebugPort / DebugObjectHandle
+        #    x64: mov eax, 0xC0000003; ret
+        #         B8 03 00 00 C0 C3
+        #    x86: mov eax, 0xC0000003; ret 0x14
+        #         B8 03 00 00 C0 C2 14 00
+        #    NOTE: this is aggressive — it blocks ALL NtQueryInformationProcess calls.
+        #    A more precise hook would check the InfoClass parameter, but that requires
+        #    a full trampoline (JMP hook), which is much more complex from Python.
+        # ----------------------------------------------------------------
+        if platform.architecture()[0] == '64bit':
+            patch_bytes(
+                b"ntdll.dll", b"NtQueryInformationProcess",
+                b"\xB8\x03\x00\x00\xC0\xC3",
+                "NtQueryInformationProcess -> STATUS_INVALID_INFO_CLASS (x64)"
+            )
+        else:
+            patch_bytes(
+                b"ntdll.dll", b"NtQueryInformationProcess",
+                b"\xB8\x03\x00\x00\xC0\xC2\x14\x00",
+                "NtQueryInformationProcess -> STATUS_INVALID_INFO_CLASS (x86)"
+            )
+
+        # ----------------------------------------------------------------
+        # 4. NtSetInformationThread — block ThreadHideFromDebugger (0x11)
+        #    Same approach: return STATUS_SUCCESS (0) immediately
+        #    x64: xor eax,eax; ret       -> 31 C0 C3
+        #    x86: xor eax,eax; ret 0x10  -> 31 C0 C2 10 00
+        # ----------------------------------------------------------------
+        if platform.architecture()[0] == '64bit':
+            patch_bytes(
+                b"ntdll.dll", b"NtSetInformationThread",
+                b"\x31\xC0\xC3",
+                "NtSetInformationThread -> ret 0 (blocks ThreadHideFromDebugger, x64)"
+            )
+        else:
+            patch_bytes(
+                b"ntdll.dll", b"NtSetInformationThread",
+                b"\x31\xC0\xC2\x10\x00",
+                "NtSetInformationThread -> ret 0 (blocks ThreadHideFromDebugger, x86)"
+            )
+
+        # ----------------------------------------------------------------
+        # 5. PEB.BeingDebugged flag — zero it out directly
+        # ----------------------------------------------------------------
+        try:
+            if platform.architecture()[0] == '64bit':
+                # x64: PEB at GS:[0x60], BeingDebugged at PEB+0x02
+                peb_code = (
+                    b"\x65\x48\x8B\x04\x25\x60\x00\x00\x00"  # mov rax, gs:[0x60]
+                    b"\xC6\x40\x02\x00"                        # mov byte [rax+2], 0
+                    b"\xC3"                                    # ret
+                )
+            else:
+                # x86: PEB at FS:[0x30], BeingDebugged at PEB+0x02
+                peb_code = (
+                    b"\x64\xA1\x30\x00\x00\x00"  # mov eax, fs:[0x30]
+                    b"\xC6\x40\x02\x00"            # mov byte [eax+2], 0
+                    b"\xC3"                        # ret
+                )
+
+            # allocate + exec shellcode to clear PEB.BeingDebugged
+            MEM_COMMIT = 0x1000
+            addr = k32.VirtualAlloc(None, len(peb_code), MEM_COMMIT, PAGE_EXECUTE_READWRITE)
+            if addr:
+                ctypes.memmove(addr, peb_code, len(peb_code))
+                thread_func = ctypes.cast(addr, ctypes.CFUNCTYPE(None))
+                thread_func()
+                k32.VirtualFree(ctypes.c_void_p(addr), 0, 0x8000)  # MEM_RELEASE
+                lines.append(f"[+] PEB.BeingDebugged cleared to 0")
+                patched += 1
+            else:
+                lines.append("[-] VirtualAlloc failed for PEB patch")
+        except Exception as e:
+            lines.append(f"[-] PEB patch failed: {e}")
+
+        lines.append(f"")
+        lines.append(f"[*] Total patches applied: {patched}/5")
+        lines.append("[*] NOTE: patches are IN-MEMORY only, applied to THIS process.")
+        lines.append("[*] Native C/C++ anti-debug checks in this process are now neutered.")
+
+    except Exception as e:
+        lines.append(f"[-] Fatal Error: {e}")
+
     save_log("nuitka_anti_anti_debug.txt", lines)
 try: run()
 except: pass
@@ -655,6 +870,445 @@ try: run()
 except: pass
 """
 
+
+def payload_trace_logger() -> str:
+    return get_common_header() + r"""
+import sys
+import threading
+import time
+
+def run():
+    lines = ["[*] Installing Trace Logger (sys.settrace)"]
+    lines.append("[!] NOTE: Nuitka-compiled functions may not emit trace events")
+    lines.append("[!]        unless built with --python-flag=no_optimization.")
+    lines.append("[!]        This payload is most effective on PyInstaller / mixed builds.")
+    
+    MAX_EVENTS = 5000
+    trace_log = []
+    event_count = [0]
+    start_time = [time.time()]
+    
+    def trace_func(frame, event, arg):
+        if event_count[0] >= MAX_EVENTS:
+            sys.settrace(None)
+            return None
+        
+        if event in ('call', 'return'):
+            elapsed = time.time() - start_time[0]
+            co = frame.f_code
+            filename = co.co_filename
+            
+            # skip stdlib / site-packages noise
+            skip = ['importlib', 'site-packages', '<frozen', 'encodings',
+                    'codecs.py', 'abc.py', '_bootstrap', 'zipimport']
+            if any(s in filename for s in skip):
+                return trace_func
+            
+            func_name = co.co_name
+            lineno = frame.f_lineno
+            depth = 0
+            f = frame.f_back
+            while f:
+                depth += 1
+                f = f.f_back
+            
+            indent = '  ' * min(depth, 20)
+            
+            if event == 'call':
+                # try to capture arguments
+                arg_info = ''
+                try:
+                    varnames = co.co_varnames[:co.co_argcount]
+                    arg_parts = []
+                    for vn in varnames:
+                        if vn in frame.f_locals:
+                            val = frame.f_locals[vn]
+                            val_s = repr(val)
+                            if len(val_s) > 80: val_s = val_s[:77] + '...'
+                            arg_parts.append(f'{vn}={val_s}')
+                    if arg_parts:
+                        arg_info = '(' + ', '.join(arg_parts) + ')'
+                except: pass
+                
+                entry = f'[{elapsed:.4f}] {indent}>> CALL  {func_name}{arg_info}  [{filename}:{lineno}]'
+            else:
+                ret_s = ''
+                try:
+                    if arg is not None:
+                        ret_s = repr(arg)
+                        if len(ret_s) > 80: ret_s = ret_s[:77] + '...'
+                        ret_s = f' -> {ret_s}'
+                except: pass
+                entry = f'[{elapsed:.4f}] {indent}<< RET   {func_name}{ret_s}  [{filename}:{lineno}]'
+            
+            trace_log.append(entry)
+            event_count[0] += 1
+        
+        return trace_func
+    
+    # install trace on the current thread
+    sys.settrace(trace_func)
+    
+    # also try sys.setprofile for C-level calls
+    profile_log = []
+    def profile_func(frame, event, arg):
+        if event in ('c_call', 'c_return'):
+            try:
+                elapsed = time.time() - start_time[0]
+                name = getattr(arg, '__name__', str(arg))
+                profile_log.append(f'[{elapsed:.4f}] C-{event}: {name}')
+            except: pass
+    
+    try:
+        sys.setprofile(profile_func)
+    except: pass
+    
+    lines.append(f"[+] Trace installed. Logging up to {MAX_EVENTS} events.")
+    lines.append("[*] Waiting 10 seconds for activity...")
+    
+    # flush after delay in a background thread
+    def flush():
+        time.sleep(10)
+        sys.settrace(None)
+        try: sys.setprofile(None)
+        except: pass
+        
+        final = ["[*] === TRACE LOG ==="]
+        final.append(f"[*] Captured {len(trace_log)} call/return events")
+        final.append(f"[*] Captured {len(profile_log)} C-level events")
+        final.append("")
+        final.extend(trace_log)
+        if profile_log:
+            final.append("")
+            final.append("[*] === C-LEVEL EVENTS ===")
+            final.extend(profile_log[:500])
+        
+        save_log("nuitka_trace.txt", final)
+    
+    t = threading.Thread(target=flush, daemon=True)
+    t.start()
+    
+    lines.append("[*] Background flush thread started.")
+    save_log("nuitka_trace.txt", lines)
+
+try: run()
+except: pass
+"""
+
+
+def payload_nuitka_explorer() -> str:
+    return get_common_header() + r"""
+import gc
+import types
+
+def run():
+    lines = ["[*] Nuitka Object Explorer — scanning GC heap"]
+    
+    nuitka_funcs = []
+    nuitka_modules = []
+    regular_funcs = []
+    code_objects = []
+    class_objects = []
+    
+    try:
+        all_objects = gc.get_objects()
+        lines.append(f"[*] Total GC-tracked objects: {len(all_objects)}")
+        
+        for obj in all_objects:
+            try:
+                otype = type(obj).__name__
+                omodule = type(obj).__module__ if hasattr(type(obj), '__module__') else ''
+                
+                # Nuitka compiled functions have special types
+                if 'compiled_function' in otype.lower() or \
+                   'nuitka' in otype.lower() or \
+                   'compiled_method' in otype.lower() or \
+                   (omodule and 'nuitka' in omodule.lower()):
+                    name = getattr(obj, '__name__', getattr(obj, '__qualname__', repr(obj)))
+                    module = getattr(obj, '__module__', '??')
+                    doc = getattr(obj, '__doc__', None)
+                    nuitka_funcs.append({
+                        'name': name, 'module': module, 'type': otype, 'doc': doc,
+                        'qualname': getattr(obj, '__qualname__', '??')
+                    })
+                
+                elif isinstance(obj, types.FunctionType):
+                    name = getattr(obj, '__qualname__', obj.__name__)
+                    module = getattr(obj, '__module__', '??')
+                    # get signature info from code object
+                    co = obj.__code__
+                    args = co.co_varnames[:co.co_argcount]
+                    regular_funcs.append({
+                        'name': name, 'module': module,
+                        'args': list(args), 'file': co.co_filename, 'line': co.co_firstlineno
+                    })
+                
+                elif isinstance(obj, types.ModuleType):
+                    mname = getattr(obj, '__name__', '??')
+                    mfile = getattr(obj, '__file__', None)
+                    if mfile and 'nuitka' in str(mfile).lower():
+                        nuitka_modules.append({'name': mname, 'file': mfile})
+                    elif mname and ('__main__' in mname or mname.startswith('_')):
+                        nuitka_modules.append({'name': mname, 'file': mfile})
+                
+                elif isinstance(obj, types.CodeType):
+                    code_objects.append({
+                        'name': obj.co_name, 'file': obj.co_filename,
+                        'args': list(obj.co_varnames[:obj.co_argcount]),
+                        'line': obj.co_firstlineno, 'size': len(obj.co_code)
+                    })
+                
+                elif isinstance(obj, type):
+                    # custom classes (not builtins)
+                    mod = getattr(obj, '__module__', '')
+                    if mod and mod != 'builtins' and not mod.startswith('_'):
+                        methods = [m for m in dir(obj) if not m.startswith('__') and callable(getattr(obj, m, None))]
+                        attrs = [a for a in dir(obj) if not a.startswith('__') and not callable(getattr(obj, a, None))]
+                        class_objects.append({
+                            'name': obj.__name__, 'module': mod,
+                            'methods': methods[:30], 'attrs': attrs[:30]
+                        })
+            except:
+                continue
+    except Exception as e:
+        lines.append(f"[-] GC scan error: {e}")
+    
+    # Report
+    lines.append("")
+    lines.append(f"{'='*60}")
+    lines.append(f"[*] NUITKA COMPILED FUNCTIONS: {len(nuitka_funcs)}")
+    lines.append(f"{'='*60}")
+    for nf in nuitka_funcs[:200]:
+        lines.append(f"  [{nf['type']}] {nf['module']}.{nf['qualname']}")
+        if nf['doc']:
+            doc_s = str(nf['doc'])[:120]
+            lines.append(f"    doc: {doc_s}")
+    
+    lines.append("")
+    lines.append(f"{'='*60}")
+    lines.append(f"[*] REGULAR PYTHON FUNCTIONS: {len(regular_funcs)}")
+    lines.append(f"{'='*60}")
+    for rf in regular_funcs[:200]:
+        args_s = ', '.join(rf['args'])
+        lines.append(f"  def {rf['name']}({args_s})  [{rf['file']}:{rf['line']}]")
+    
+    lines.append("")
+    lines.append(f"{'='*60}")
+    lines.append(f"[*] CLASSES: {len(class_objects)}")
+    lines.append(f"{'='*60}")
+    for co in class_objects[:100]:
+        lines.append(f"  class {co['module']}.{co['name']}")
+        if co['methods']:
+            lines.append(f"    methods: {', '.join(co['methods'])}")
+        if co['attrs']:
+            lines.append(f"    attrs:   {', '.join(co['attrs'])}")
+    
+    lines.append("")
+    lines.append(f"{'='*60}")
+    lines.append(f"[*] CODE OBJECTS: {len(code_objects)}")
+    lines.append(f"{'='*60}")
+    for c in code_objects[:200]:
+        args_s = ', '.join(c['args'])
+        lines.append(f"  code '{c['name']}({args_s})'  size={c['size']}  [{c['file']}:{c['line']}]")
+    
+    lines.append("")
+    lines.append(f"{'='*60}")
+    lines.append(f"[*] NUITKA / INTERNAL MODULES: {len(nuitka_modules)}")
+    lines.append(f"{'='*60}")
+    for nm in nuitka_modules:
+        lines.append(f"  {nm['name']}  ->  {nm['file']}")
+    
+    lines.append("")
+    lines.append(f"[*] Summary: {len(nuitka_funcs)} nuitka funcs, {len(regular_funcs)} py funcs, "
+                 f"{len(class_objects)} classes, {len(code_objects)} code objects")
+    
+    save_log("nuitka_explorer.txt", lines)
+
+try: run()
+except: pass
+"""
+
+
+def payload_bytecode_extractor() -> str:
+    return get_common_header() + r"""
+import gc
+import types
+import marshal
+import os
+import dis
+import io
+
+def run():
+    lines = ["[*] Bytecode Extractor — dumping all code objects from memory"]
+    lines.append("[!] NOTE: Nuitka compiles Python -> C. Primary logic will NOT have CodeType objects.")
+    lines.append("[!]        This payload is designed for: PyInstaller, mixed Nuitka builds,")
+    lines.append("[!]        stdlib/dependencies still loaded as .pyc, and PyArmor targets.")
+    
+    dump_dir = os.path.join(os.environ.get("TEMP", "C:\\"), "nuitka_bytecode_dump")
+    try:
+        os.makedirs(dump_dir, exist_ok=True)
+    except:
+        dump_dir = "C:\\nuitka_bytecode_dump"
+        os.makedirs(dump_dir, exist_ok=True)
+    
+    lines.append(f"[*] Dump directory: {dump_dir}")
+    
+    code_objects = []
+    func_objects = []
+    
+    try:
+        all_objects = gc.get_objects()
+        for obj in all_objects:
+            try:
+                if isinstance(obj, types.CodeType):
+                    code_objects.append(obj)
+                elif isinstance(obj, types.FunctionType):
+                    func_objects.append(obj)
+                    if hasattr(obj, '__code__') and isinstance(obj.__code__, types.CodeType):
+                        code_objects.append(obj.__code__)
+            except: continue
+    except Exception as e:
+        lines.append(f"[-] GC scan error: {e}")
+    
+    # deduplicate by id
+    seen = set()
+    unique_codes = []
+    for co in code_objects:
+        if id(co) not in seen:
+            seen.add(id(co))
+            unique_codes.append(co)
+    
+    lines.append(f"[*] Found {len(unique_codes)} unique code objects")
+    lines.append(f"[*] Found {len(func_objects)} function objects")
+    
+    # Dump each code object
+    dumped = 0
+    for i, co in enumerate(unique_codes):
+        try:
+            name = co.co_name or f'anonymous_{i}'
+            safe_name = ''.join(c if c.isalnum() or c in '_-.' else '_' for c in name)
+            filename = co.co_filename or 'unknown'
+            safe_fn = ''.join(c if c.isalnum() or c in '_-.' else '_' for c in os.path.basename(filename))
+            
+            prefix = f"{i:04d}_{safe_fn}_{safe_name}"
+            
+            # 1. Marshal dump (.pyc-compatible)
+            try:
+                marshal_path = os.path.join(dump_dir, f"{prefix}.marshal")
+                with open(marshal_path, 'wb') as f:
+                    marshal.dump(co, f)
+            except: pass
+            
+            # 2. Disassembly dump
+            try:
+                dis_path = os.path.join(dump_dir, f"{prefix}.dis")
+                sio = io.StringIO()
+                dis.dis(co, file=sio)
+                with open(dis_path, 'w', encoding='utf-8') as f:
+                    f.write(f"# Code object: {co.co_name}\n")
+                    f.write(f"# File: {co.co_filename}\n")
+                    f.write(f"# Line: {co.co_firstlineno}\n")
+                    f.write(f"# Args: {co.co_varnames[:co.co_argcount]}\n")
+                    f.write(f"# Locals: {co.co_varnames}\n")
+                    f.write(f"# Consts: {co.co_consts}\n")
+                    f.write(f"# Names: {co.co_names}\n")
+                    f.write(f"\n# === Disassembly ===\n")
+                    f.write(sio.getvalue())
+            except: pass
+            
+            # 3. Info for the main log
+            args = list(co.co_varnames[:co.co_argcount])
+            consts_preview = []
+            for c in co.co_consts:
+                if isinstance(c, (str, int, float, bytes)) and c is not None:
+                    s = repr(c)
+                    if len(s) > 60: s = s[:57] + '...'
+                    consts_preview.append(s)
+            
+            lines.append(f"")
+            lines.append(f"[{i}] {co.co_name}({', '.join(args)})  [{co.co_filename}:{co.co_firstlineno}]")
+            lines.append(f"     bytecode size: {len(co.co_code)}  locals: {len(co.co_varnames)}  stacksize: {co.co_stacksize}")
+            if consts_preview:
+                lines.append(f"     consts: {', '.join(consts_preview[:10])}")
+            
+            dumped += 1
+        except:
+            continue
+    
+    # Also dump function defaults and closures
+    lines.append("")
+    lines.append("=" * 50)
+    lines.append(f"[*] Function Defaults & Closures:")
+    for fn in func_objects[:200]:
+        try:
+            name = getattr(fn, '__qualname__', fn.__name__)
+            defaults = fn.__defaults__
+            kwdefaults = fn.__kwdefaults__
+            closure = fn.__closure__
+            
+            extra = []
+            if defaults: extra.append(f"defaults={defaults}")
+            if kwdefaults: extra.append(f"kwdefaults={kwdefaults}")
+            if closure:
+                cells = []
+                for cell in closure:
+                    try: cells.append(repr(cell.cell_contents)[:80])
+                    except: cells.append('<empty>')
+                extra.append(f"closure={cells}")
+            
+            if extra:
+                lines.append(f"  {name}: {', '.join(extra)}")
+        except: continue
+    
+    lines.append("")
+    lines.append(f"[*] Total dumped: {dumped} code objects to {dump_dir}")
+    lines.append("[*] Use: python -c \"import marshal,dis; co=marshal.load(open('file.marshal','rb')); dis.dis(co)\"")
+    lines.append("[*] Or use uncompyle6/decompyle3 to recover source from .marshal files.")
+    
+    save_log("nuitka_bytecode.txt", lines)
+
+try: run()
+except: pass
+"""
+
+def _aob_scan_module(pm, module_handle, module_size, pattern: bytes) -> int:
+    """Scan a module's memory for a byte pattern (AOB scan).
+    Returns the address of the first match or 0."""
+    try:
+        CHUNK = 0x10000  # read 64KB chunks
+        base = module_handle
+        for offset in range(0, module_size, CHUNK):
+            read_size = min(CHUNK, module_size - offset)
+            try:
+                data = pm.read_bytes(base + offset, read_size)
+            except:
+                continue
+            idx = data.find(pattern)
+            if idx != -1:
+                return base + offset + idx
+    except:
+        pass
+    return 0
+
+
+# Well-known byte patterns for common Python C-API function prologues.
+# These are searched only as a last resort when the export table has no match.
+# Each entry: { 'name': str, 'patterns_x64': [bytes], 'patterns_x86': [bytes] }
+# The patterns are the first N bytes of the function body (unique enough to identify).
+_AOB_PATTERNS = {
+    # PyRun_SimpleString is a thin wrapper around PyRun_SimpleStringFlags
+    # common prologue: sub rsp, 28h; xor edx, edx; call PyRun_SimpleStringFlags
+    'PyRun_SimpleString': {
+        'x64': [b'\x48\x83\xEC\x28\x33\xD2'],   # sub rsp,28h; xor edx,edx
+        'x86': [b'\x6A\x00\xFF\x74\x24'],          # push 0; push [esp+arg]
+    },
+    'PyGILState_Ensure': {
+        'x64': [b'\x48\x89\x5C\x24'],              # mov [rsp+...], rbx (common prologue)
+        'x86': [b'\x53\x56\x57'],                    # push ebx; push esi; push edi
+    },
+}
+
+
 def get_remote_func(pm, dll_path, func_name):
     try:
         pe = pefile.PE(dll_path)
@@ -682,14 +1336,43 @@ def get_remote_func(pm, dll_path, func_name):
         
         pe.close()
         
+        if func_rva:
+            remote_mod = pymem.process.module_from_name(pm.process_handle, os.path.basename(dll_path))
+            if remote_mod:
+                return remote_mod.lpBaseOfDll + func_rva
+        
+        # ---------------------------------------------------------------
+        # FALLBACK: AOB pattern scan when exports are stripped / missing
+        # ---------------------------------------------------------------
         if not func_rva:
-            return 0
+            console.print(f"[yellow][!] Export '{func_name}' not found in EAT, trying AOB scan...[/yellow]")
+            remote_mod = pymem.process.module_from_name(pm.process_handle, os.path.basename(dll_path))
+            if remote_mod and func_name in _AOB_PATTERNS:
+                arch_key = 'x64'  # default
+                try:
+                    sys_info = SYSTEM_INFO()
+                    kernel32.GetNativeSystemInfo(ctypes.byref(sys_info))
+                    wow64 = ctypes.c_bool()
+                    h = kernel32.OpenProcess(0x1000, False, pm.process_id)
+                    if h and kernel32.IsWow64Process(h, ctypes.byref(wow64)):
+                        arch_key = 'x86' if wow64.value else 'x64'
+                    if h: kernel32.CloseHandle(h)
+                except:
+                    pass
+                
+                patterns = _AOB_PATTERNS[func_name].get(arch_key, [])
+                for pat in patterns:
+                    addr = _aob_scan_module(
+                        pm, remote_mod.lpBaseOfDll, 
+                        remote_mod.SizeOfImage, pat
+                    )
+                    if addr:
+                        console.print(f"[green][+] AOB match for '{func_name}' at 0x{addr:X}[/green]")
+                        return addr
             
-        remote_mod = pymem.process.module_from_name(pm.process_handle, os.path.basename(dll_path))
-        if not remote_mod:
-            return 0
-            
-        return remote_mod.lpBaseOfDll + func_rva
+            console.print(f"[red][!] AOB scan failed for '{func_name}'[/red]")
+        
+        return 0
 
     except Exception as e:
         console.print(f"[red][!] Error resolving address for {func_name}: {e}[/red]")
@@ -756,11 +1439,14 @@ def show_menu():
     table.add_row("2", "Inspector", "List methods of custom Classes (Universal)")
     table.add_row("3", "Fuzzer", "Call method without args to find signature")
     table.add_row("4", "Payday", "Execute Custom Script")
-    table.add_row("5", "Anti-Anti-Debug", "Bypass IsDebuggerPresent & Inject Action")
+    table.add_row("5", "Anti-Anti-Debug", "Deep bypass (IsDebugger, NtQuery, FindWindow)")
     table.add_row("6", "Deep Scan", "Scan full memory (GC) for hidden secrets")
     table.add_row("7", "MITM Hook", "Intercept function calls & arguments")
     table.add_row("8", "HTTP Spy", "Log all requests (HTTPS Bypass)")
     table.add_row("9", "Environment", "Dump os.environ (Config & Keys)")
+    table.add_row("10", "Trace Logger", "sys.settrace call-graph with args [NEW]")
+    table.add_row("11", "Nuitka Explorer", "GC heap scan for compiled objects [NEW]")
+    table.add_row("12", "Bytecode Dump", "Extract & disassemble all code objects [NEW]")
     
     console.print(table)
 
@@ -782,7 +1468,9 @@ def main():
         t.add_column("Name")
         t.add_column("Ver", style="yellow")
         t.add_column("DLL")
-        for p in procs: t.add_row(str(p['pid']), p['name'], p['ver'], p['dll_name'])
+        for p in procs:
+            tag = " [STATIC]" if p.get('static') else ""
+            t.add_row(str(p['pid']), p['name'], p['ver'] + tag, p['dll_name'])
         console.print(t)
         
         pid_s = Prompt.ask("\nSelect [cyan]PID[/cyan] (or 'q')")
@@ -794,8 +1482,8 @@ def main():
             continue
             
         show_menu()
-        mode = Prompt.ask("Select [cyan]Payload Mode[/cyan] [cyan][1-9/q][/cyan]", 
-                         choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "q"], 
+        mode = Prompt.ask("Select [cyan]Payload Mode[/cyan] [cyan][1-12/q][/cyan]", 
+                         choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "q"], 
                          show_choices=False)
         if mode == 'q': break
         
@@ -811,6 +1499,9 @@ def main():
         elif mode == "7": payload = payload_mitm(); report_file = "nuitka_mitm_log.txt"
         elif mode == "8": payload = payload_http_spy(); report_file = "nuitka_http_spy.txt"
         elif mode == "9": payload = payload_env_dump(); report_file = "nuitka_env.txt"
+        elif mode == "10": payload = payload_trace_logger(); report_file = "nuitka_trace.txt"
+        elif mode == "11": payload = payload_nuitka_explorer(); report_file = "nuitka_explorer.txt"
+        elif mode == "12": payload = payload_bytecode_extractor(); report_file = "nuitka_bytecode.txt"
             
         if inject(tgt['pid'], tgt['dll_path'], payload, tgt['arch']):
             console.print(f"\n[bold green]SUCCESS![/bold green] Payload executed.")
