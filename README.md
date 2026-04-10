@@ -68,7 +68,7 @@ Select the Target PID from the list of detected Python processes.
 ## ⚙️ **Configuration (Advanced)**
 Modes **3 (Fuzzer), 4 (Payday),** and **7 (MITM)** act as templates. To target a specific logic in a specific application, you need to edit the injector.py file.
 Look for the `configuration`  blocks inside the payload strings:
-`TARGET_CLASS_NAME = "PaymentProcessor"`  and  `TARGET_METHOD_NAME = "process_transaction"`
+`TARGET_CLASS_NAME = "PaymentProcessor"`  and  `TARGET_METHOD_NAME = "process_transaction"`.
 Modes 10, 11 and 12 are fully automatic and require no additional configuration. They are especially effective against heavily obfuscated or statically compiled Nuitka applications.
 
 **Inspector, Deep Scan, HTTP Spy,** and **Dumpers** are fully automatic and require no configuration.
