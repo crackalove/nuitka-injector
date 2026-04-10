@@ -28,6 +28,9 @@ The framework includes **9 distinct payloads** for different phases of analysis:
 7.  **MITM Hook**: Installs a Python decorator on target functions to intercept arguments, modify return values, and log traffic in real-time.
 8.  **HTTP Spy**: Hooks `requests.Session.request` to capture traffic **before** HTTPS encryption. Bypasses SSL Pinning and certificate checks.
 9.  **Environment Dump**: Extracts `os.environ` variables to find Cloud Keys (AWS, Google), Connection Strings, and hidden flags.
+10. **Trace Logger** — Installs `sys.settrace` + `sys.setprofile` to log function calls and arguments in real time.
+11. **Nuitka Explorer** — Deep scan of the GC heap to find compiled Nuitka functions, modules, classes and code objects.
+12. **Bytecode Extractor** — Extracts all code objects from memory, saves them as marshal files and provides disassembly.
 
 ---
 
