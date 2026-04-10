@@ -124,7 +124,6 @@ PYAPI_SIGNATURES = {
 }
 
 def _probe_exe_for_python_api(exe_path: str) -> bool:
-    """Check if the .exe exports Python C-API (static link). Fast path."""
     try:
         pe = pefile.PE(exe_path, fast_load=True)
         pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
