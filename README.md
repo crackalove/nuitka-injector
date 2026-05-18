@@ -17,7 +17,7 @@ It specifically targets compiled Python applications (Nuitka, PyInstaller, cx_Fr
 
 ## ⌨️ **Features**
 
-The framework includes **9 distinct payloads** for different phases of analysis:
+The framework includes **12 distinct payloads** for different phases of analysis:
 
 1.  **Full Dumper**: Extracts all global variables from `__main__`. Useful for dumping hidden configs and database credentials loaded in memory.
 2.  **Universal Inspector**: Reflective scanner that discovers **all custom classes** in the target process. Lists methods `[M]` and attributes `[V]` dynamically.
